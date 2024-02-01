@@ -13,8 +13,7 @@ use crate::common::telemetry_ops::collections_telemetry::{
 use crate::common::telemetry_ops::requests_telemetry::{
     GrpcTelemetry, RequestsTelemetry, WebApiTelemetry,
 };
-
-use super::telemetry_ops::requests_telemetry::WebApiTelemetryKey;
+use crate::telemetry_ops::requests_telemetry::WebApiTelemetryKey;
 
 /// Whitelist for REST endpoints in metrics output.
 ///
