@@ -46,9 +46,14 @@ where
             let instant = std::time::Instant::now();
             let response = future.await?;
             let status = response.response().status().as_u16();
+            // let collection = response
+            //     .headers()
+            //     .get("-x-collection")
+            //     .and_then(|x| x.to_str().map(|x| x.to_string()).ok());
+            let collection = Some("test_collection".to_string());
             telemetry_data
                 .lock()
-                .add_response(request_key, status, instant);
+                .add_response(request_key, status, collection, instant);
             Ok(response)
         })
     }

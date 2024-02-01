@@ -11,9 +11,16 @@ use serde::{Deserialize, Serialize};
 
 pub type HttpStatusCode = u16;
 
+#[derive(PartialEq, Eq, Hash, Clone, Debug, Serialize, Deserialize)]
+pub struct WebApiTelemetryKey {
+    pub request_key: String,
+    pub status_code: u16,
+    pub collection: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Default, Debug, JsonSchema)]
 pub struct WebApiTelemetry {
-    pub responses: HashMap<String, HashMap<HttpStatusCode, OperationDurationStatistics>>,
+    pub responses: HashMap<WebApiTelemetryKey, OperationDurationStatistics>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug, JsonSchema)]
@@ -27,7 +34,7 @@ pub struct ActixTelemetryCollector {
 
 #[derive(Default)]
 pub struct ActixWorkerTelemetryCollector {
-    methods: HashMap<String, HashMap<HttpStatusCode, Arc<Mutex<OperationDurationsAggregator>>>>,
+    methods: HashMap<WebApiTelemetryKey, Arc<Mutex<OperationDurationsAggregator>>>,
 }
 
 pub struct TonicTelemetryCollector {
@@ -96,27 +103,26 @@ impl TonicWorkerTelemetryCollector {
 impl ActixWorkerTelemetryCollector {
     pub fn add_response(
         &mut self,
-        method: String,
+        request_key: String,
         status_code: HttpStatusCode,
+        collection: Option<String>,
         instant: std::time::Instant,
     ) {
         let aggregator = self
             .methods
-            .entry(method)
-            .or_default()
-            .entry(status_code)
+            .entry(WebApiTelemetryKey {
+                request_key,
+                collection,
+                status_code,
+            })
             .or_insert_with(OperationDurationsAggregator::new);
         ScopeDurationMeasurer::new_with_instant(aggregator, instant);
     }
 
     pub fn get_telemetry_data(&self) -> WebApiTelemetry {
         let mut responses = HashMap::new();
-        for (method, status_codes) in &self.methods {
-            let mut status_codes_map = HashMap::new();
-            for (status_code, aggregator) in status_codes {
-                status_codes_map.insert(*status_code, aggregator.lock().get_statistics());
-            }
-            responses.insert(method.clone(), status_codes_map);
+        for (key, aggregator) in &self.methods {
+            responses.insert(key.clone(), aggregator.lock().get_statistics());
         }
         WebApiTelemetry { responses }
     }
@@ -133,11 +139,11 @@ impl GrpcTelemetry {
 
 impl WebApiTelemetry {
     pub fn merge(&mut self, other: &WebApiTelemetry) {
-        for (method, status_codes) in &other.responses {
-            let status_codes_map = self.responses.entry(method.clone()).or_default();
-            for (status_code, statistics) in status_codes {
-                let entry = status_codes_map.entry(*status_code).or_default();
+        for (key, statistics) in &other.responses {
+            if let Some(entry) = self.responses.get_mut(key) {
                 *entry = entry.clone() + statistics.clone();
+            } else {
+                self.responses.insert(key.clone(), statistics.clone());
             }
         }
     }
@@ -170,19 +176,11 @@ impl Anonymize for RequestsTelemetry {
 
 impl Anonymize for WebApiTelemetry {
     fn anonymize(&self) -> Self {
-        let responses = self
-            .responses
-            .iter()
-            .map(|(key, value)| {
-                let value: HashMap<_, _> = value
-                    .iter()
-                    .map(|(key, value)| (*key, value.anonymize()))
-                    .collect();
-                (key.clone(), value)
-            })
-            .collect();
-
-        WebApiTelemetry { responses }
+        let mut res = self.clone();
+        res.responses.values_mut().for_each(|value| {
+            value.anonymize();
+        });
+        res
     }
 }
 

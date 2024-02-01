@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use prometheus::proto::{Counter, Gauge, LabelPair, Metric, MetricFamily, MetricType};
 use prometheus::TextEncoder;
+use segment::common::operation_time_statistics::OperationDurationStatistics;
 
 use crate::common::telemetry::TelemetryData;
 use crate::common::telemetry_ops::app_telemetry::{AppBuildTelemetry, AppFeaturesTelemetry};
@@ -10,6 +13,8 @@ use crate::common::telemetry_ops::collections_telemetry::{
 use crate::common::telemetry_ops::requests_telemetry::{
     GrpcTelemetry, RequestsTelemetry, WebApiTelemetry,
 };
+
+use super::telemetry_ops::requests_telemetry::WebApiTelemetryKey;
 
 /// Whitelist for REST endpoints in metrics output.
 ///
@@ -193,39 +198,58 @@ impl MetricsProvider for WebApiTelemetry {
     fn add_metrics(&self, metrics: &mut Vec<MetricFamily>) {
         let (mut total, mut fail_total, mut avg_secs, mut min_secs, mut max_secs) =
             (vec![], vec![], vec![], vec![], vec![]);
-        for (endpoint, responses) in &self.responses {
-            let (method, endpoint) = endpoint.split_once(' ').unwrap();
 
-            // Endpoint must be whitelisted
+        let mut apply_metrics = |arg: (&WebApiTelemetryKey, &OperationDurationStatistics)| {
+            let (key, stats) = arg;
+            let (method, endpoint) = key.request_key.split_once(' ').unwrap();
+            let status = key.status_code;
+            let collection = &key.collection;
+
             if REST_ENDPOINT_WHITELIST.binary_search(&endpoint).is_err() {
-                continue;
+                return;
             }
 
-            for (status, stats) in responses {
-                let labels = [
-                    ("method", method),
-                    ("endpoint", endpoint),
-                    ("status", &status.to_string()),
-                ];
-                total.push(counter(stats.count as f64, &labels));
-                fail_total.push(counter(stats.fail_count as f64, &labels));
-
-                if *status == REST_TIMINGS_FOR_STATUS {
-                    avg_secs.push(gauge(
-                        stats.avg_duration_micros.unwrap_or(0.0) as f64 / 1_000_000.0,
-                        &labels,
-                    ));
-                    min_secs.push(gauge(
-                        stats.min_duration_micros.unwrap_or(0.0) as f64 / 1_000_000.0,
-                        &labels,
-                    ));
-                    max_secs.push(gauge(
-                        stats.max_duration_micros.unwrap_or(0.0) as f64 / 1_000_000.0,
-                        &labels,
-                    ));
-                }
+            let mut labels = vec![("method", method), ("endpoint", endpoint)];
+            if let Some(collection) = collection {
+                labels.push(("collection", collection));
             }
+            let status_str = status.to_string();
+            labels.push(("status", &status_str));
+
+            total.push(counter(stats.count as f64, &labels));
+            fail_total.push(counter(stats.fail_count as f64, &labels));
+
+            if status == REST_TIMINGS_FOR_STATUS {
+                avg_secs.push(gauge(
+                    stats.avg_duration_micros.unwrap_or(0.0) as f64 / 1_000_000.0,
+                    &labels,
+                ));
+                min_secs.push(gauge(
+                    stats.min_duration_micros.unwrap_or(0.0) as f64 / 1_000_000.0,
+                    &labels,
+                ));
+                max_secs.push(gauge(
+                    stats.max_duration_micros.unwrap_or(0.0) as f64 / 1_000_000.0,
+                    &labels,
+                ));
+            }
+        };
+
+        // For total metrics
+        let mut merged: HashMap<_, OperationDurationStatistics> = HashMap::new();
+        for (key, stats) in &self.responses {
+            let entry = merged
+                .entry(WebApiTelemetryKey {
+                    request_key: key.request_key.clone(),
+                    status_code: key.status_code,
+                    collection: None,
+                })
+                .or_default();
+            *entry = entry.clone() + stats.clone();
         }
+        merged.iter().for_each(&mut apply_metrics);
+
+        self.responses.iter().for_each(apply_metrics);
 
         if !total.is_empty() {
             metrics.push(metric_family(
